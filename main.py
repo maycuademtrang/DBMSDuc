@@ -54,24 +54,45 @@ class BankingSystem:
             print("Lỗi hệ thống khi đăng nhập:", e)
             return False
 
-    def dang_ky_khach_hang(self, ma_kh, ho_ten, cmnd, ngay_sinh, username, password):
+    def dang_ky_khach_hang(self, ho_ten, cmnd, ngay_sinh, username, password):
+        """Tạo khách hàng mới; DB tự sinh `ma_kh`. Trả về (True, message) hoặc (False, error)."""
         try:
             with self.conn.cursor() as cur:
-                cur.execute("SELECT ma_kh FROM khach_hang WHERE ma_kh = %s OR cmnd = %s", (ma_kh, cmnd))
-                if cur.fetchone(): return False, "Mã khách hàng hoặc CMND đã tồn tại!"
-                cur.execute("SELECT username FROM khach_hang WHERE username = %s UNION SELECT username FROM nhan_vien WHERE username = %s", (username, username))
-                if cur.fetchone(): return False, "Tên đăng nhập đã có người sử dụng!"
-                
-                cur.execute("INSERT INTO khach_hang (ma_kh, ho_ten, cmnd, ngay_sinh, username, password) VALUES (%s, %s, %s, %s, %s, %s)", (ma_kh, ho_ten, cmnd, ngay_sinh, username, password))
-                
+                # Kiểm tra trùng CMND và username
+                cur.execute("SELECT 1 FROM khach_hang WHERE cmnd = %s", (cmnd,))
+                if cur.fetchone():
+                    return False, "CMND/CCCD đã tồn tại trong hệ thống!"
+                cur.execute("SELECT 1 FROM khach_hang WHERE username = %s UNION SELECT 1 FROM nhan_vien WHERE username = %s", (username, username))
+                if cur.fetchone():
+                    return False, "Tên đăng nhập đã có người sử dụng!"
+
+                # Tạo mã khách hàng tự động tăng (VD: KH1, KH2...)
+                cur.execute("SELECT ma_kh FROM khach_hang WHERE ma_kh LIKE 'KH%'")
+                danh_sach_ma = cur.fetchall()
+                max_id = 0
+                for row in danh_sach_ma:
+                    try:
+                        num = int(row[0].replace('KH', ''))
+                        if num > max_id: max_id = num
+                    except: pass
+                ma_kh_moi = f"KH{max_id + 1}"
+
+                # Thêm khách hàng mới với mã vừa tạo
+                cur.execute(
+                    "INSERT INTO khach_hang (ma_kh, ho_ten, cmnd, ngay_sinh, username, password) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (ma_kh_moi, ho_ten, cmnd, ngay_sinh, username, password)
+                )
+
+                # Tạo số TK ngẫu nhiên (10 chữ số) và gán số dư khởi tạo
                 while True:
                     so_tk = str(random.randint(1000000000, 9999999999))
-                    cur.execute("SELECT so_tk FROM tai_khoan WHERE so_tk = %s", (so_tk,))
-                    if not cur.fetchone(): break 
-                
-                cur.execute("INSERT INTO tai_khoan (so_tk, ma_kh, so_du) VALUES (%s, %s, 50000)", (so_tk, ma_kh))
+                    cur.execute("SELECT 1 FROM tai_khoan WHERE so_tk = %s", (so_tk,))
+                    if not cur.fetchone():
+                        break
+
+                cur.execute("INSERT INTO tai_khoan (so_tk, ma_kh, so_du) VALUES (%s, %s, 50000)", (so_tk, ma_kh_moi))
                 self.conn.commit()
-                return True, f"Đăng ký thành công!\nHệ thống cấp Số TK mặc định: {so_tk}\nSố dư: 50,000đ"
+                return True, f"Đăng ký thành công!\n👤 Mã KH của bạn: {ma_kh_moi}\n💳 Số TK mặc định: {so_tk}\n💰 Số dư: 50,000đ"
         except Exception as e:
             self.conn.rollback()
             return False, f"Lỗi DB: {str(e)}"
@@ -81,25 +102,65 @@ class BankingSystem:
         """Tự động nâng cấp Database: Thêm trạng thái thẻ, Tài khoản KH, và Số dư Thẻ độc lập"""
         if self.conn:
             try:
+                # Dùng SAVEPOINT để chạy tuần tự từng lệnh ALTER, tránh lỗi 1 câu làm sập cả cụm
                 with self.conn.cursor() as cur:
-                    cur.execute("ALTER TABLE the ADD COLUMN IF NOT EXISTS trang_thai VARCHAR(20) DEFAULT 'Hoat dong'")
-                    cur.execute("ALTER TABLE khach_hang ADD COLUMN IF NOT EXISTS username VARCHAR(50)")
-                    cur.execute("ALTER TABLE khach_hang ADD COLUMN IF NOT EXISTS password VARCHAR(255)")
-                    
-                    # Nâng cấp cho Thẻ Trả Trước (Prepaid Card) có số dư riêng biệt
-                    cur.execute("ALTER TABLE the ADD COLUMN IF NOT EXISTS so_du DECIMAL(15, 2) DEFAULT 0 CHECK (so_du >= 0)")
-                    
-                    # Mở rộng cột giao dịch để lưu được cả Số Thẻ (16 số) thay vì chỉ lưu Số TK (10 số)
-                    cur.execute("ALTER TABLE giao_dich ALTER COLUMN tk_nguon TYPE VARCHAR(20)")
-                    cur.execute("ALTER TABLE giao_dich ALTER COLUMN tk_dich TYPE VARCHAR(20)")
-                    
-                    # Bỏ khóa ngoại cũ để lưu được mã thẻ vào lịch sử
-                    try: cur.execute("ALTER TABLE giao_dich DROP CONSTRAINT giao_dich_tk_nguon_fkey")
-                    except: pass
-                    try: cur.execute("ALTER TABLE giao_dich DROP CONSTRAINT giao_dich_tk_dich_fkey")
-                    except: pass
-                    
-                    self.conn.commit()
+                    queries = [
+                        "ALTER TABLE the ADD COLUMN IF NOT EXISTS trang_thai VARCHAR(20) DEFAULT 'Hoat dong'",
+                        "ALTER TABLE khach_hang ADD COLUMN IF NOT EXISTS username VARCHAR(50)",
+                        "ALTER TABLE khach_hang ADD COLUMN IF NOT EXISTS password VARCHAR(255)",
+                        "ALTER TABLE the ADD COLUMN IF NOT EXISTS so_du DECIMAL(15, 2) DEFAULT 0 CHECK (so_du >= 0)",
+                        "ALTER TABLE loai_the ADD COLUMN IF NOT EXISTS dau_so VARCHAR(6) DEFAULT '970400'",
+                        "ALTER TABLE giao_dich ALTER COLUMN tk_nguon TYPE VARCHAR(20)",
+                        "ALTER TABLE giao_dich ALTER COLUMN tk_dich TYPE VARCHAR(20)",
+                        "ALTER TABLE giao_dich DROP CONSTRAINT IF EXISTS giao_dich_tk_nguon_fkey",
+                        "ALTER TABLE giao_dich DROP CONSTRAINT IF EXISTS giao_dich_tk_dich_fkey"
+                    ]
+                    for q in queries:
+                        try:
+                            cur.execute("SAVEPOINT sp")
+                            cur.execute(q)
+                            cur.execute("RELEASE SAVEPOINT sp")
+                        except Exception as e:
+                            cur.execute("ROLLBACK TO SAVEPOINT sp")
+                            
+                    # Cập nhật Trigger tự động cho cả thẻ và TK
+                    cur.execute("""
+                        CREATE OR REPLACE FUNCTION fn_check_so_du()
+                        RETURNS TRIGGER AS $$
+                        BEGIN
+                            IF NEW.loai_gd IN ('Rút tiền', 'Chuyển khoản') THEN
+                                IF length(NEW.tk_nguon) <= 15 THEN
+                                    IF NOT EXISTS (SELECT 1 FROM tai_khoan WHERE so_tk = NEW.tk_nguon AND (so_du - NEW.so_tien) >= 50000) THEN
+                                        RAISE EXCEPTION 'Số dư tài khoản không đủ (cần duy trì tối thiểu 50.000đ)';
+                                    END IF;
+                                ELSE
+                                    IF NOT EXISTS (SELECT 1 FROM the WHERE so_the = NEW.tk_nguon AND (so_du - NEW.so_tien) >= 0) THEN
+                                        RAISE EXCEPTION 'Số dư thẻ không đủ để giao dịch';
+                                    END IF;
+                                END IF;
+                            END IF;
+                            RETURN NEW;
+                        END;
+                        $$ LANGUAGE plpgsql;
+                    """)
+                    cur.execute("""
+                        CREATE OR REPLACE FUNCTION update_so_du_sau_giao_dich()
+                        RETURNS TRIGGER AS $$
+                        BEGIN
+                            IF NEW.loai_gd IN ('Rút tiền', 'Chuyển khoản') AND NEW.tk_nguon IS NOT NULL THEN
+                                IF length(NEW.tk_nguon) <= 15 THEN UPDATE tai_khoan SET so_du = so_du - NEW.so_tien WHERE so_tk = NEW.tk_nguon;
+                                ELSE UPDATE the SET so_du = so_du - NEW.so_tien WHERE so_the = NEW.tk_nguon; END IF;
+                            END IF;
+                            IF NEW.loai_gd IN ('Nạp tiền', 'Chuyển khoản') AND NEW.tk_dich IS NOT NULL THEN
+                                IF length(NEW.tk_dich) <= 15 THEN UPDATE tai_khoan SET so_du = so_du + NEW.so_tien WHERE so_tk = NEW.tk_dich;
+                                ELSE UPDATE the SET so_du = so_du + NEW.so_tien WHERE so_the = NEW.tk_dich; END IF;
+                            END IF;
+                            RETURN NEW;
+                        END;
+                        $$ LANGUAGE plpgsql;
+                    """)
+
+                self.conn.commit()
             except Exception as e:
                 self.conn.rollback()
                 print("Lỗi setup DB:", e)
@@ -128,20 +189,23 @@ class BankingSystem:
                 bang_dich = "tai_khoan" if is_dich_tk else "the"
                 cot_dich = "so_tk" if is_dich_tk else "so_the"
 
-                # Thực hiện chuyển
-                cur.execute(f"UPDATE {bang_nguon} SET so_du = so_du - %s WHERE {cot_nguon} = %s", (so_tien, tk_nguon))
-                cur.execute(f"UPDATE {bang_dich} SET so_du = so_du + %s WHERE {cot_dich} = %s RETURNING so_du", (so_tien, tk_dich))
-                if cur.rowcount == 0:
-                    self.conn.rollback()
+                # Kiểm tra Đích tồn tại (Tiền sẽ được Trigger DB tự cập nhật)
+                cur.execute(f"SELECT 1 FROM {bang_dich} WHERE {cot_dich} = %s", (tk_dich,))
+                if not cur.fetchone():
                     return False, "Đích nhận tiền không tồn tại!"
 
-                # 3. Lưu lịch sử
+                # 3. Lưu lịch sử (Trigger DB sẽ tự trừ và cộng tiền)
                 cur.execute("INSERT INTO giao_dich (tk_nguon, tk_dich, loai_gd, so_tien, noi_dung) VALUES (%s, %s, 'Chuyển khoản', %s, %s)", (tk_nguon, tk_dich, so_tien, noi_dung))
                 self.conn.commit()
                 return True, "Chuyển khoản thành công!"
         except Exception as e:
             self.conn.rollback()
-            return False, str(e)
+            err_msg = str(e)
+            if "Số dư tài khoản không đủ" in err_msg or "tai_khoan_so_du_check" in err_msg:
+                err_msg = "Số dư không đủ để thực hiện giao dịch (cần duy trì tối thiểu 50.000đ)"
+            elif "Số dư thẻ không đủ" in err_msg:
+                err_msg = "Số dư trong thẻ không đủ để giao dịch!"
+            return False, err_msg
 
     def lay_ds_nguon_tien_cua_khach(self, ma_kh):
         """Lấy danh sách các tài sản (TK + Thẻ) có thể dùng để trích tiền"""
@@ -167,8 +231,8 @@ class BankingSystem:
                 bang_dich = "tai_khoan" if is_dich_tk else "the"
                 cot_dich = "so_tk" if is_dich_tk else "so_the"
 
-                cur.execute(f"UPDATE {bang_dich} SET so_du = so_du + %s WHERE {cot_dich} = %s RETURNING so_du", (so_tien, so_nhan))
-                if cur.rowcount == 0: return False, "Không tìm thấy số tài khoản hoặc số thẻ!"
+                cur.execute(f"SELECT 1 FROM {bang_dich} WHERE {cot_dich} = %s", (so_nhan,))
+                if not cur.fetchone(): return False, "Không tìm thấy số tài khoản hoặc số thẻ!"
                 
                 cur.execute("INSERT INTO giao_dich (tk_dich, loai_gd, so_tien, noi_dung) VALUES (%s, 'Nạp tiền', %s, %s)", (so_nhan, so_tien, noi_dung))
                 self.conn.commit()
@@ -285,6 +349,32 @@ class BankingSystem:
                 cur.execute(query, tuple(params))
                 return cur.fetchall()
         except: return []
+
+    def sao_ke_giao_dich(self, ma_kh=None, so_tk=None):
+        """Trả về danh sách giao dịch cho báo cáo nhanh.
+        - Nếu `ma_kh` được cung cấp: lấy tất cả giao dịch liên quan tới KH đó.
+        - Nếu `so_tk` được cung cấp: lấy giao dịch theo số tài khoản.
+        """
+        try:
+            with self.conn.cursor() as cur:
+                if ma_kh:
+                    query = """
+                        SELECT ma_gd, loai_gd, so_tien, ngay_gd, tk_nguon, tk_dich, noi_dung
+                        FROM giao_dich
+                        WHERE tk_nguon IN (SELECT so_tk FROM tai_khoan WHERE ma_kh = %s)
+                          OR tk_dich IN (SELECT so_tk FROM tai_khoan WHERE ma_kh = %s)
+                          OR tk_nguon IN (SELECT t.so_the FROM the t JOIN tai_khoan tk ON t.so_tk = tk.so_tk WHERE tk.ma_kh = %s)
+                          OR tk_dich IN (SELECT t.so_the FROM the t JOIN tai_khoan tk ON t.so_tk = tk.so_tk WHERE tk.ma_kh = %s)
+                        ORDER BY ngay_gd DESC
+                    """
+                    cur.execute(query, (ma_kh, ma_kh, ma_kh, ma_kh))
+                elif so_tk:
+                    cur.execute("SELECT ma_gd, loai_gd, so_tien, ngay_gd, tk_nguon, tk_dich, noi_dung FROM giao_dich WHERE tk_nguon = %s OR tk_dich = %s ORDER BY ngay_gd DESC", (so_tk, so_tk))
+                else:
+                    cur.execute("SELECT ma_gd, loai_gd, so_tien, ngay_gd, tk_nguon, tk_dich, noi_dung FROM giao_dich ORDER BY ngay_gd DESC")
+                return cur.fetchall()
+        except Exception:
+            return []
 
     def lay_ds_khach_hang(self):
         with self.conn.cursor() as cur:
@@ -405,12 +495,12 @@ class BankingApp(ctk.CTk):
 
     def show_register_screen(self):
         self.clear_window()
-        frame = ctk.CTkFrame(master=self, width=500, height=650, fg_color=M_TRANG, border_width=0, corner_radius=25)
+        frame = ctk.CTkFrame(master=self, width=500, height=600, fg_color=M_TRANG, border_width=0, corner_radius=25)
         frame.place(relx=0.5, rely=0.5, anchor="center")
         ctk.CTkLabel(master=frame, text="💳 Bankdash.", font=("Helvetica", 24, "bold"), text_color=M_BLUE_CHINH).pack(pady=(30,5))
         ctk.CTkLabel(master=frame, text="Mở tài khoản Internet Banking", font=("Arial", 14), text_color=M_TEXT_GREY).pack(pady=(0,20))
         
-        e_makh = self.create_form_entry(frame, "Mã KH (VD: KH001)")
+        # ĐÃ XÓA Ô NHẬP MÃ KH Ở ĐÂY
         e_hoten = self.create_form_entry(frame, "Họ và Tên")
         e_cmnd = self.create_form_entry(frame, "CMND / CCCD")
         e_ns = self.create_form_entry(frame, "Ngày sinh (YYYY-MM-DD)")
@@ -418,7 +508,8 @@ class BankingApp(ctk.CTk):
         e_password = self.create_form_entry(frame, "Mật khẩu", is_password=True)
 
         def submit_reg():
-            s, m = self.db.dang_ky_khach_hang(e_makh.get(), e_hoten.get(), e_cmnd.get(), e_ns.get(), e_username.get(), e_password.get())
+            # Chỉ truyền 5 tham số thay vì 6
+            s, m = self.db.dang_ky_khach_hang(e_hoten.get(), e_cmnd.get(), e_ns.get(), e_username.get(), e_password.get())
             if s: 
                 messagebox.showinfo("Thành công", m)
                 self.show_login()
@@ -429,6 +520,7 @@ class BankingApp(ctk.CTk):
         ctk.CTkButton(master=frame_btn, text="XÁC NHẬN", width=140, height=40, font=("Arial", 14, "bold"), fg_color=M_BLUE_CHINH, hover_color=M_BLUE_HOVER, corner_radius=10, command=submit_reg).pack(side="left", padx=10)
         ctk.CTkButton(master=frame_btn, text="Quay lại", width=140, height=40, font=("Arial", 14), fg_color="transparent", border_width=1, border_color="#E6EFF5", text_color=M_TEXT_DARK, hover_color="#F0F4FF", corner_radius=10, command=self.show_login).pack(side="left", padx=10)
 
+        
     # --- DASHBOARD CHÍNH ---
     def show_dashboard(self):
         self.clear_window()
@@ -740,7 +832,7 @@ class BankingApp(ctk.CTk):
                 tree.insert("", "end", values=r)
 
         if role != 'khachhang':
-            ctk.CTkButton(master=frame_top, text="Tra Cứu", width=120, height=40, font=("Arial", 14, "bold"), fg_color=M_BLUE_CHINH, corner_radius=10, command=load_sao_ke).pack(side="left")
+            ctk.CTkButton(master=row2, text="Tra Cứu", width=120, height=40, font=("Arial", 14, "bold"), fg_color=M_BLUE_CHINH, corner_radius=10, command=load_sao_ke).pack(side="left")
         else:
             load_sao_ke() 
 
