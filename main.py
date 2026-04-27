@@ -46,22 +46,20 @@ class BankingSystem:
         try:
             with self.conn.cursor() as cur:
                 cur.execute("SELECT ma_kh FROM khach_hang WHERE ma_kh = %s OR cmnd = %s", (ma_kh, cmnd))
-                if cur.fetchone(): return False, "Mã khách hàng hoặc CMND/CCCD đã tồn tại!"
+                if cur.fetchone(): return False, "Mã khách hàng hoặc CMND đã tồn tại!"
                 cur.execute("SELECT username FROM khach_hang WHERE username = %s UNION SELECT username FROM nhan_vien WHERE username = %s", (username, username))
                 if cur.fetchone(): return False, "Tên đăng nhập đã có người sử dụng!"
                 
-                # 1. Lưu khách hàng
                 cur.execute("INSERT INTO khach_hang (ma_kh, ho_ten, cmnd, ngay_sinh, username, password) VALUES (%s, %s, %s, %s, %s, %s)", (ma_kh, ho_ten, cmnd, ngay_sinh, username, password))
                 
-                # 2. TỰ ĐỘNG TẠO SỐ TÀI KHOẢN 10 SỐ NGẪU NHIÊN
                 while True:
                     so_tk = str(random.randint(1000000000, 9999999999))
                     cur.execute("SELECT so_tk FROM tai_khoan WHERE so_tk = %s", (so_tk,))
-                    if not cur.fetchone(): break # Thoát vòng lặp nếu số TK không trùng
+                    if not cur.fetchone(): break 
                 
                 cur.execute("INSERT INTO tai_khoan (so_tk, ma_kh, so_du) VALUES (%s, %s, 50000)", (so_tk, ma_kh))
                 self.conn.commit()
-                return True, f"Đăng ký thành công!\nHệ thống đã cấp Số tài khoản mặc định: {so_tk}\nSố dư ban đầu: 50,000đ"
+                return True, f"Đăng ký thành công!\nHệ thống cấp Số TK mặc định: {so_tk}\nSố dư: 50,000đ"
         except Exception as e:
             self.conn.rollback()
             return False, f"Lỗi DB: {str(e)}"
@@ -72,11 +70,8 @@ class BankingSystem:
                 cur.execute("SELECT so_du, ma_kh FROM tai_khoan WHERE so_tk = %s", (tk_nguon,))
                 row = cur.fetchone()
                 if not row: return False, "Tài khoản nguồn không tồn tại!"
-                
-                # Nếu là khách hàng, chặn không cho nhập số TK của người khác để chuyển
                 if self.current_user['vai_tro'] == 'khachhang' and row[1] != self.current_user['ma']:
-                    return False, "Bạn chỉ có thể chuyển tiền từ số tài khoản của chính mình!"
-                
+                    return False, "Chỉ được chuyển tiền từ số tài khoản của chính mình!"
                 if row[0] < float(so_tien): return False, "Số dư không đủ!"
 
                 cur.execute("UPDATE tai_khoan SET so_du = so_du - %s WHERE so_tk = %s", (so_tien, tk_nguon))
@@ -101,15 +96,36 @@ class BankingSystem:
                 if cur.rowcount == 0: return False, "Không tìm thấy số tài khoản hoặc số thẻ!"
                 cur.execute("INSERT INTO giao_dich (tk_dich, loai_gd, so_tien, noi_dung) VALUES (%s, 'Nạp tiền', %s, %s)", (tk_dich, so_tien, noi_dung))
                 self.conn.commit()
-                return True, f"Giao dịch thành công!"
+                return True, f"Nạp tiền thành công!"
         except Exception as e:
             self.conn.rollback()
             return False, str(e)
 
-    # --- QUẢN LÝ THẺ VÀ TÀI KHOẢN ---
+    # --- CÁC HÀM TRA CỨU TÊN MỚI ĐƯỢC CẬP NHẬT ---
+    def lay_ten_chu_tai_khoan(self, so_tk):
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT kh.ho_ten FROM tai_khoan tk JOIN khach_hang kh ON tk.ma_kh = kh.ma_kh WHERE tk.so_tk = %s", (so_tk,))
+                res = cur.fetchone()
+                return res[0] if res else None
+        except: return None
+
+    def lay_ten_tu_tk_hoac_the(self, so_nhan):
+        """Hàm này dành riêng cho Nạp tiền (Quét cả TK và Thẻ)"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT kh.ho_ten FROM tai_khoan tk JOIN khach_hang kh ON tk.ma_kh = kh.ma_kh WHERE tk.so_tk = %s", (so_nhan,))
+                res = cur.fetchone()
+                if res: return res[0]
+                
+                cur.execute("SELECT kh.ho_ten FROM the t JOIN tai_khoan tk ON t.so_tk = tk.so_tk JOIN khach_hang kh ON tk.ma_kh = kh.ma_kh WHERE t.so_the = %s", (so_nhan,))
+                res = cur.fetchone()
+                return res[0] if res else None
+        except: return None
+
     def lay_ds_tk_cua_khach(self, ma_kh):
         with self.conn.cursor() as cur:
-            cur.execute("SELECT so_tk, so_du FROM tai_khoan WHERE ma_kh = %s", (ma_kh,))
+            cur.execute("SELECT so_tk, so_du, ngay_mo, trang_thai FROM tai_khoan WHERE ma_kh = %s ORDER BY ngay_mo DESC", (ma_kh,))
             return cur.fetchall()
 
     def lay_ds_loai_the(self):
@@ -120,15 +136,11 @@ class BankingSystem:
     def tao_the_tu_dong(self, so_tk, ma_loai_the, pin, ma_kh=None):
         try:
             with self.conn.cursor() as cur:
-                # Kiểm tra quyền: Nếu là Khách, số tài khoản đó phải là của Khách
                 if ma_kh:
                     cur.execute("SELECT so_tk FROM tai_khoan WHERE so_tk = %s AND ma_kh = %s", (so_tk, ma_kh))
                     if not cur.fetchone(): return False, "Bạn không có quyền sở hữu số tài khoản này!"
-
                 cur.execute("SELECT dau_so FROM loai_the WHERE ma_loai_the = %s", (ma_loai_the,))
                 dau_so = cur.fetchone()[0]
-
-                # Tự động sinh 12 số đuôi kết hợp với 4 số đầu của loại thẻ
                 while True:
                     so_the = dau_so + "".join([str(random.randint(0,9)) for _ in range(12)])
                     cur.execute("SELECT so_the FROM the WHERE so_the = %s", (so_the,))
@@ -157,23 +169,15 @@ class BankingSystem:
                 elif action == 'mo_khoa': cur.execute("UPDATE the SET trang_thai = 'Hoat dong' WHERE so_the = %s", (so_the,))
                 else: cur.execute("DELETE FROM the WHERE so_the = %s", (so_the,))
                 self.conn.commit()
-                return True, "Thao tác trên thẻ thành công!"
+                return True, "Thao tác thành công!"
         except Exception as e:
             self.conn.rollback()
             return False, str(e)
 
     def sao_ke_giao_dich(self, so_tk=None, ma_kh=None):
-        """Bảo mật: Nếu có ma_kh, chỉ lấy giao dịch thuộc các tài khoản của khách hàng đó"""
         with self.conn.cursor() as cur:
             if ma_kh:
-                # Lấy toàn bộ lịch sử của khách hàng đó
-                cur.execute("""
-                    SELECT ma_gd, loai_gd, so_tien, ngay_gd, tk_nguon, tk_dich, noi_dung 
-                    FROM giao_dich 
-                    WHERE tk_nguon IN (SELECT so_tk FROM tai_khoan WHERE ma_kh = %s) 
-                       OR tk_dich IN (SELECT so_tk FROM tai_khoan WHERE ma_kh = %s) 
-                    ORDER BY ngay_gd DESC
-                """, (ma_kh, ma_kh))
+                cur.execute("SELECT ma_gd, loai_gd, so_tien, ngay_gd, tk_nguon, tk_dich, noi_dung FROM giao_dich WHERE tk_nguon IN (SELECT so_tk FROM tai_khoan WHERE ma_kh = %s) OR tk_dich IN (SELECT so_tk FROM tai_khoan WHERE ma_kh = %s) ORDER BY ngay_gd DESC", (ma_kh, ma_kh))
             else:
                 cur.execute("SELECT ma_gd, loai_gd, so_tien, ngay_gd, tk_nguon, tk_dich, noi_dung FROM giao_dich WHERE tk_nguon = %s OR tk_dich = %s ORDER BY ngay_gd DESC", (so_tk, so_tk))
             return cur.fetchall()
@@ -192,10 +196,9 @@ class BankingSystem:
         try:
             with self.conn.cursor() as cur:
                 cur.execute("SELECT ma_nv FROM nhan_vien WHERE ma_nv = %s", (ma_nv,))
-                if cur.fetchone(): return False, "Mã nhân viên này đã tồn tại!"
+                if cur.fetchone(): return False, "Mã nhân viên đã tồn tại!"
                 cur.execute("SELECT username FROM nhan_vien WHERE username = %s UNION SELECT username FROM khach_hang WHERE username = %s", (user, user))
-                if cur.fetchone(): return False, "Tên đăng nhập này đã có người sử dụng!"
-
+                if cur.fetchone(): return False, "Tên đăng nhập đã có người dùng!"
                 cur.execute("INSERT INTO nhan_vien (ma_nv, ho_ten, username, password, vai_tro, luong) VALUES (%s, %s, %s, %s, %s, %s)", (ma_nv, ho_ten, user, pwd, vai_tro, luong))
                 self.conn.commit()
                 return True, "Thêm nhân sự thành công!"
@@ -207,9 +210,9 @@ class BankingSystem:
         try:
             with self.conn.cursor() as cur:
                 cur.execute("UPDATE nhan_vien SET vai_tro = %s WHERE ma_nv = %s RETURNING ma_nv", (vai_tro_moi, ma_nv))
-                if cur.rowcount == 0: return False, "Không tìm thấy Mã nhân viên này!"
+                if cur.rowcount == 0: return False, "Không tìm thấy Mã nhân viên!"
                 self.conn.commit()
-                return True, f"Đã đổi chức vụ thành {vai_tro_moi.upper()}"
+                return True, f"Cập nhật thành {vai_tro_moi.upper()}"
         except Exception as e:
             self.conn.rollback()
             return False, str(e)
@@ -221,29 +224,14 @@ class BankingSystem:
                 target = cur.fetchone()
                 if not target: return False, "Không tìm thấy nhân viên!"
                 if role_nguoi_xoa == 'quanly' and target[0] in ['admin', 'quanly']:
-                    return False, "Quản lý không có quyền xóa Admin hoặc Quản lý khác!"
+                    return False, "Quản lý không thể xóa Admin/Quản lý khác!"
                 cur.execute("DELETE FROM nhan_vien WHERE ma_nv = %s", (ma_nv,))
                 self.conn.commit()
                 return True, "Xóa nhân viên thành công!"
         except Exception as e:
             self.conn.rollback()
             return False, str(e)
-    
-    def lay_ten_chu_tai_khoan(self, so_tk):
-        """Truy vấn chéo từ bảng tai_khoan sang bảng khach_hang để lấy họ tên"""
-        try:
-            with self.conn.cursor() as cur:
-                cur.execute("""
-                    SELECT kh.ho_ten 
-                    FROM tai_khoan tk 
-                    JOIN khach_hang kh ON tk.ma_kh = kh.ma_kh 
-                    WHERE tk.so_tk = %s
-                """, (so_tk,))
-                result = cur.fetchone()
-                return result[0] if result else None
-        except Exception as e:
-            return None
-        
+
 # ========================================================== #
 # PHẦN 2: LỚP GIAO DIỆN CHUẨN BANKDASH
 # ========================================================== #
@@ -254,13 +242,11 @@ class BankingApp(ctk.CTk):
         self.geometry("1150x750")
         self.resizable(False, False)
         self.configure(fg_color=M_BG_APP) 
-        
         self.db = BankingSystem()
         if not self.db.conn:
-            messagebox.showerror("Lỗi", "Mất kết nối Database! Vui lòng kiểm tra PostgreSQL.")
+            messagebox.showerror("Lỗi", "Mất kết nối Database!")
             self.destroy()
             return
-            
         self.setup_treeview_style()
         self.show_login()
 
@@ -310,8 +296,7 @@ class BankingApp(ctk.CTk):
         ctk.CTkButton(master=frame, text="Đăng ký tài khoản Khách Hàng", width=300, height=40, font=("Arial", 13), fg_color="transparent", text_color=M_BLUE_CHINH, hover_color="#F0F4FF", command=self.show_register_screen).place(relx=0.5, rely=0.88, anchor="center")
 
     def do_login(self):
-        if self.db.login(self.e_user.get(), self.e_pass.get()): 
-            self.show_dashboard()
+        if self.db.login(self.e_user.get(), self.e_pass.get()): self.show_dashboard()
         else: messagebox.showerror("Lỗi", "Sai tên đăng nhập hoặc mật khẩu!")
 
     def show_register_screen(self):
@@ -346,7 +331,6 @@ class BankingApp(ctk.CTk):
         role = self.db.current_user['vai_tro']
         ho_ten = self.db.current_user['ho_ten']
         
-        # 1. KHỞI TẠO VÙNG BÊN PHẢI TRƯỚC
         self.main_container = ctk.CTkFrame(master=self, fg_color=M_BG_APP, corner_radius=0)
         self.main_container.pack(side="right", fill="both", expand=True)
 
@@ -363,7 +347,6 @@ class BankingApp(ctk.CTk):
         self.main_frame = ctk.CTkFrame(master=self.main_container, fg_color="transparent")
         self.main_frame.pack(fill="both", expand=True)
 
-        # 2. KHỞI TẠO SIDEBAR BÊN TRÁI
         sidebar = ctk.CTkFrame(master=self, width=250, fg_color=M_BG_SIDEBAR, corner_radius=0)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False) 
@@ -373,14 +356,13 @@ class BankingApp(ctk.CTk):
         self.active_menu_btn = None
         self.first_btn_info = None
 
-        # 3. RẼ NHÁNH GIAO DIỆN KHÁCH HÀNG / NHÂN VIÊN
         if role == 'khachhang':
             self.create_menu_btn(sidebar, "🏠", "Tổng Quan", self.ui_sao_ke)
             self.create_menu_btn(sidebar, "💸", "Chuyển Khoản", self.ui_chuyen_khoan)
             self.create_menu_btn(sidebar, "💳", "Thẻ Của Tôi", self.ui_quan_ly_the)
         else:
             self.create_menu_btn(sidebar, "🏠", "Tổng Quan", self.ui_sao_ke)
-            self.create_menu_btn(sidebar, "📥", "Nạp Tiền", self.ui_nap_tien)
+            self.create_menu_btn(sidebar, "📥", "Nạp Tiền (Quầy)", self.ui_nap_tien)
             self.create_menu_btn(sidebar, "💸", "Chuyển Khoản", self.ui_chuyen_khoan)
             self.create_menu_btn(sidebar, "💳", "Quản Lý Thẻ", self.ui_quan_ly_the)
             
@@ -426,20 +408,45 @@ class BankingApp(ctk.CTk):
         return card
 
     def ui_nap_tien(self):
-        card = self.create_card_frame("Giao Dịch Nạp Tiền")
+        card = self.create_card_frame("Giao Dịch Nạp Tiền (Nhân Viên Tại Quầy)")
         e_tk = self.create_form_entry(card, "Nhập Số Tài Khoản hoặc Số Thẻ")
+        
+        # --- HIỂN THỊ TÊN TỰ ĐỘNG CHO CHỨC NĂNG NẠP TIỀN ---
+        lbl_ten = ctk.CTkLabel(master=card, text="", font=("Arial", 14, "bold"))
+        lbl_ten.pack(pady=(0, 10))
+
         e_tien = self.create_form_entry(card, "Số tiền nạp (VNĐ)")
         e_nd = self.create_form_entry(card, "Nội dung giao dịch")
+        
+        def kiem_tra_ten(event):
+            so_nhan = e_tk.get().strip()
+            if len(so_nhan) >= 8:
+                ten = self.db.lay_ten_tu_tk_hoac_the(so_nhan)
+                if ten:
+                    lbl_ten.configure(text=f"👤 Tên người nhận: {ten}", text_color="#16DBCC")
+                else:
+                    lbl_ten.configure(text="⚠️ Không tìm thấy Tài khoản / Thẻ này!", text_color="#FF4B4A")
+            else:
+                lbl_ten.configure(text="")
+
+        e_tk.bind("<KeyRelease>", kiem_tra_ten)
+        # ---------------------------------------------------
+
         def submit():
             success, msg = self.db.nap_tien(e_tk.get(), e_tien.get(), e_nd.get())
             messagebox.showinfo("Kết quả", msg) if success else messagebox.showerror("Lỗi", msg)
+            if success:
+                e_tk.delete(0, 'end')
+                e_tien.delete(0, 'end')
+                e_nd.delete(0, 'end')
+                lbl_ten.configure(text="")
+                
         ctk.CTkButton(master=card, text="Xác Nhận Nạp Tiền", width=350, height=45, font=("Arial", 14, "bold"), fg_color=M_BLUE_CHINH, hover_color=M_BLUE_HOVER, corner_radius=10, command=submit).pack(pady=30)
 
     def ui_chuyen_khoan(self):
         role = self.db.current_user['vai_tro']
         card = self.create_card_frame("Chuyển Khoản Nội Bộ")
         
-        # Xử lý ô TK Nguồn
         if role == 'khachhang':
             ds_tk = self.db.lay_ds_tk_cua_khach(self.db.current_user['ma'])
             ds_tk_cb = [f"{t[0]} (Số dư: {t[1]:,.0f}đ)" for t in ds_tk] if ds_tk else ["Bạn chưa có số tài khoản"]
@@ -449,40 +456,36 @@ class BankingApp(ctk.CTk):
         else:
             e_n = self.create_form_entry(card, "Số TK Nguồn (Trích tiền)")
 
-        # Xử lý ô TK Đích và Label Tự động hiện tên
         e_d = self.create_form_entry(card, "Số TK Đích (Nhận tiền)")
         
-        # Tạo sẵn 1 dòng text trống để chứa tên người nhận
+        # --- HIỂN THỊ TÊN TỰ ĐỘNG KHI CHUYỂN KHOẢN ---
         lbl_ten_nguoi_nhan = ctk.CTkLabel(master=card, text="", font=("Arial", 14, "bold"))
         lbl_ten_nguoi_nhan.pack(pady=(0, 10))
+
+        def kiem_tra_ten(event):
+            so_tk_dich = e_d.get().strip() 
+            if len(so_tk_dich) >= 8: 
+                ten = self.db.lay_ten_chu_tai_khoan(so_tk_dich)
+                if ten:
+                    lbl_ten_nguoi_nhan.configure(text=f"👤 Người nhận: {ten}", text_color="#16DBCC") 
+                else:
+                    lbl_ten_nguoi_nhan.configure(text="⚠️ Không tìm thấy tài khoản!", text_color="#FF4B4A") 
+            else:
+                lbl_ten_nguoi_nhan.configure(text="") 
+
+        e_d.bind("<KeyRelease>", kiem_tra_ten)
+        # ---------------------------------------------
 
         e_t = self.create_form_entry(card, "Số tiền chuyển (VNĐ)")
         e_nd = self.create_form_entry(card, "Nội dung chuyển khoản")
         
-        # --- LOGIC TỰ ĐỘNG HIỆN TÊN ---
-        def kiem_tra_ten(event):
-            so_tk_dich = e_d.get().strip() # Lấy dữ liệu đang gõ
-            if len(so_tk_dich) >= 8: # Số TK thường dài, gõ đến ký tự thứ 8 mới bắt đầu tìm để đỡ lag
-                ten = self.db.lay_ten_chu_tai_khoan(so_tk_dich)
-                if ten:
-                    lbl_ten_nguoi_nhan.configure(text=f"👤 Người nhận: {ten}", text_color="#16DBCC") # Màu xanh lá
-                else:
-                    lbl_ten_nguoi_nhan.configure(text="⚠️ Không tìm thấy tài khoản!", text_color="#FF4B4A") # Màu đỏ
-            else:
-                lbl_ten_nguoi_nhan.configure(text="") # Xóa chữ nếu xóa bớt số
-
-        # Gắn sự kiện "Mỗi khi nhả phím ra" (<KeyRelease>) vào ô nhập TK đích
-        e_d.bind("<KeyRelease>", kiem_tra_ten)
-        # ------------------------------
-
         def submit():
             tk_nguon = cb_tk_nguon.get().split(" ")[0] if role == 'khachhang' else e_n.get()
             success, msg = self.db.chuyen_khoan(tk_nguon, e_d.get(), e_t.get(), e_nd.get())
             messagebox.showinfo("Kết quả", msg) if success else messagebox.showerror("Lỗi", msg)
-            if success and role == 'khachhang': self.ui_chuyen_khoan() # Tải lại form để update số dư hiển thị
+            if success and role == 'khachhang': self.ui_chuyen_khoan() 
             
         ctk.CTkButton(master=card, text="Thực Hiện Chuyển", width=350, height=45, font=("Arial", 14, "bold"), fg_color=M_BLUE_CHINH, hover_color=M_BLUE_HOVER, corner_radius=10, command=submit).pack(pady=30)
-    
 
     def ui_quan_ly_the(self):
         role = self.db.current_user['vai_tro']
@@ -498,7 +501,6 @@ class BankingApp(ctk.CTk):
 
         def load_the():
             for i in tree_the.get_children(): tree_the.delete(i)
-            # Khách hàng chỉ thấy thẻ của chính mình
             danh_sach = self.db.lay_ds_the(self.db.current_user['ma'] if role == 'khachhang' else None)
             for r in danh_sach: tree_the.insert("", "end", values=r)
         load_the()
@@ -520,11 +522,9 @@ class BankingApp(ctk.CTk):
         ctk.CTkButton(frame_btn, text="Khóa Thẻ", width=120, fg_color="#FFA756", hover_color="#FF8C00", corner_radius=8, command=lambda: thao_tac_the('khoa')).pack(side="left", padx=10)
         ctk.CTkButton(frame_btn, text="Mở Khóa", width=120, fg_color="#16DBCC", hover_color="#12B3A6", corner_radius=8, command=lambda: thao_tac_the('mo_khoa')).pack(side="left", padx=10)
         
-        # Khách hàng không có quyền XÓA thẻ khỏi hệ thống (chỉ khóa)
         if role != 'khachhang':
             ctk.CTkButton(frame_btn, text="Hủy Thẻ", width=120, fg_color="#FF4B4A", hover_color="#E03A3A", corner_radius=8, command=lambda: thao_tac_the('xoa')).pack(side="left", padx=10)
 
-        # TAB PHÁT HÀNH THẺ MỚI 
         if role == 'khachhang':
             ds_tk = self.db.lay_ds_tk_cua_khach(self.db.current_user['ma'])
             ds_tk_cb = [t[0] for t in ds_tk] if ds_tk else ["Chưa có TK"]
@@ -561,7 +561,6 @@ class BankingApp(ctk.CTk):
         frame_top = ctk.CTkFrame(master=card, fg_color="transparent")
         frame_top.pack(fill="x", pady=10, padx=20)
         
-        # Nếu là nhân viên, hiển thị ô tìm kiếm
         if role != 'khachhang':
             e_tk = ctk.CTkEntry(master=frame_top, placeholder_text="Nhập Số tài khoản để tra cứu...", width=400, height=40, font=("Arial", 14), fg_color=M_BG_APP, text_color=M_TEXT_DARK, border_width=0, corner_radius=10)
             e_tk.pack(side="left", padx=(0, 10))
@@ -574,7 +573,6 @@ class BankingApp(ctk.CTk):
 
         def load_sao_ke():
             for i in tree.get_children(): tree.delete(i)
-            # Khách hàng tự động lấy theo Mã KH, Nhân viên lấy theo số TK nhập vào
             if role == 'khachhang':
                 rows = self.db.sao_ke_giao_dich(ma_kh=self.db.current_user['ma'])
             else:
@@ -583,12 +581,17 @@ class BankingApp(ctk.CTk):
             for row in rows:
                 r = list(row)
                 r[2] = f"{r[2]:,.0f} đ"
+                
+                # BIẾN ĐỔI NONE THÀNH "NGÂN HÀNG" KHI IN RA BẢNG GIAO DIỆN
+                if r[4] is None: r[4] = "Ngân hàng"
+                if r[5] is None: r[5] = "Ngân hàng"
+                
                 tree.insert("", "end", values=r)
 
         if role != 'khachhang':
             ctk.CTkButton(master=frame_top, text="Tra Cứu", width=120, height=40, font=("Arial", 14, "bold"), fg_color=M_BLUE_CHINH, corner_radius=10, command=load_sao_ke).pack(side="left")
         else:
-            load_sao_ke() # Tự động load ngay nếu là khách
+            load_sao_ke() 
 
     def ui_quan_ly_khach_hang(self):
         card = self.create_card_frame("Tổng Hợp Tài Khoản Khách Hàng")
