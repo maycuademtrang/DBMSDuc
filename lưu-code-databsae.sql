@@ -37,7 +37,8 @@ CREATE TABLE tai_khoan (
 CREATE TABLE loai_the (
     ma_loai_the VARCHAR(10) PRIMARY KEY, 
     ten_loai VARCHAR(50) NOT NULL, 
-    mo_ta TEXT
+    mo_ta TEXT,
+    dau_so VARCHAR(6) DEFAULT '970400'
 );
 
 CREATE TABLE the (
@@ -47,13 +48,14 @@ CREATE TABLE the (
     ngay_phat_hanh DATE DEFAULT CURRENT_DATE, 
     ngay_het_han DATE NOT NULL, 
     pin VARCHAR(255) NOT NULL, 
+    so_du DECIMAL(15, 2) DEFAULT 0 CHECK (so_du >= 0),
     trang_thai VARCHAR(20) DEFAULT 'Hoat dong'
 );
 
 CREATE TABLE giao_dich (
     ma_gd SERIAL PRIMARY KEY, 
-    tk_nguon VARCHAR(15) REFERENCES tai_khoan(so_tk), 
-    tk_dich VARCHAR(15) REFERENCES tai_khoan(so_tk), 
+    tk_nguon VARCHAR(20), 
+    tk_dich VARCHAR(20), 
     loai_gd VARCHAR(50), 
     so_tien DECIMAL(15, 2) NOT NULL, 
     ngay_gd TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
@@ -66,9 +68,9 @@ INSERT INTO nhan_vien (ma_nv, ho_ten, username, password, vai_tro, luong)
 VALUES ('ADMIN01', 'Tổng Giám Đốc', 'admin', '123456', 'admin', 99000000);
 
 -- Tạo sẵn các loại thẻ danh mục
-INSERT INTO loai_the (ma_loai_the, ten_loai, mo_ta) VALUES 
-('NAPAS', 'Thẻ ATM Nội Địa', 'Rút tiền và thanh toán trong nước'),
-('VISA_DB', 'Visa Debit', 'Thẻ ghi nợ quốc tế');
+INSERT INTO loai_the (ma_loai_the, ten_loai, mo_ta, dau_so) VALUES 
+('NAPAS', 'Thẻ ATM Nội Địa', 'Rút tiền và thanh toán trong nước', '970400'),
+('VISA_DB', 'Visa Debit', 'Thẻ ghi nợ quốc tế', '422000');
 
 -- =========================================================
 -- 4. FUNCTION & TRIGGER
@@ -79,11 +81,14 @@ CREATE OR REPLACE FUNCTION fn_check_so_du()
 RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.loai_gd IN ('Rút tiền', 'Chuyển khoản') THEN
-        IF NOT EXISTS (
-            SELECT 1 FROM tai_khoan 
-            WHERE so_tk = NEW.tk_nguon AND (so_du - NEW.so_tien) >= 50000
-        ) THEN
-            RAISE EXCEPTION 'Số dư không đủ để thực hiện giao dịch (cần duy trì tối thiểu 50.000đ)';
+        IF length(NEW.tk_nguon) <= 15 THEN
+            IF NOT EXISTS (SELECT 1 FROM tai_khoan WHERE so_tk = NEW.tk_nguon AND (so_du - NEW.so_tien) >= 50000) THEN
+                RAISE EXCEPTION 'Số dư tài khoản không đủ (cần duy trì tối thiểu 50.000đ)';
+            END IF;
+        ELSE
+            IF NOT EXISTS (SELECT 1 FROM the WHERE so_the = NEW.tk_nguon AND (so_du - NEW.so_tien) >= 0) THEN
+                RAISE EXCEPTION 'Số dư thẻ không đủ để giao dịch';
+            END IF;
         END IF;
     END IF;
     RETURN NEW;
@@ -99,20 +104,14 @@ EXECUTE FUNCTION fn_check_so_du();
 CREATE OR REPLACE FUNCTION update_so_du_sau_giao_dich()
 RETURNS TRIGGER AS $$
 BEGIN
-    -- Trừ tiền tài khoản nguồn nếu là rút tiền hoặc chuyển khoản
     IF NEW.loai_gd IN ('Rút tiền', 'Chuyển khoản') AND NEW.tk_nguon IS NOT NULL THEN
-        UPDATE tai_khoan 
-        SET so_du = so_du - NEW.so_tien 
-        WHERE so_tk = NEW.tk_nguon;
+        IF length(NEW.tk_nguon) <= 15 THEN UPDATE tai_khoan SET so_du = so_du - NEW.so_tien WHERE so_tk = NEW.tk_nguon;
+        ELSE UPDATE the SET so_du = so_du - NEW.so_tien WHERE so_the = NEW.tk_nguon; END IF;
     END IF;
-
-    -- Cộng tiền tài khoản đích nếu là nạp tiền hoặc chuyển khoản
     IF NEW.loai_gd IN ('Nạp tiền', 'Chuyển khoản') AND NEW.tk_dich IS NOT NULL THEN
-        UPDATE tai_khoan 
-        SET so_du = so_du + NEW.so_tien 
-        WHERE so_tk = NEW.tk_dich;
+        IF length(NEW.tk_dich) <= 15 THEN UPDATE tai_khoan SET so_du = so_du + NEW.so_tien WHERE so_tk = NEW.tk_dich;
+        ELSE UPDATE the SET so_du = so_du + NEW.so_tien WHERE so_the = NEW.tk_dich; END IF;
     END IF;
-
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -158,3 +157,46 @@ BEGIN
     VALUES (p_tk_nguon, p_tk_dich, 'Chuyển khoản', p_so_tien, p_noi_dung);
 END;
 $$;
+
+-- =========================================================
+-- 6. VIEWS (GÓC NHÌN DỮ LIỆU)
+-- =========================================================
+
+-- View 1: Thông tin tổng hợp Khách hàng và Tài khoản
+CREATE OR REPLACE VIEW vw_thong_tin_khach_hang AS
+SELECT 
+    kh.ma_kh, 
+    kh.ho_ten, 
+    kh.cmnd, 
+    tk.so_tk, 
+    tk.so_du,
+    tk.trang_thai AS trang_thai_tk
+FROM khach_hang kh
+LEFT JOIN tai_khoan tk ON kh.ma_kh = tk.ma_kh;
+
+-- View 2: Chi tiết các thẻ đang phát hành và Chủ thẻ
+CREATE OR REPLACE VIEW vw_chi_tiet_the AS
+SELECT 
+    t.so_the,
+    l.ten_loai AS loai_the,
+    kh.ho_ten AS ten_chu_the,
+    t.so_tk AS tai_khoan_lien_ket,
+    t.ngay_het_han,
+    t.trang_thai
+FROM the t
+JOIN loai_the l ON t.ma_loai_the = l.ma_loai_the
+JOIN tai_khoan tk ON t.so_tk = tk.so_tk
+JOIN khach_hang kh ON tk.ma_kh = kh.ma_kh;
+
+-- View 3: Lịch sử giao dịch 
+CREATE OR REPLACE VIEW vw_sao_ke_giao_dich AS
+SELECT 
+    gd.ma_gd,
+    gd.ngay_gd,
+    gd.loai_gd,
+    gd.tk_nguon,
+    gd.tk_dich,
+    gd.so_tien,
+    gd.noi_dung
+FROM giao_dich gd
+ORDER BY gd.ngay_gd DESC;
