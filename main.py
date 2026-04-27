@@ -110,10 +110,12 @@ class BankingSystem:
                         "ALTER TABLE khach_hang ADD COLUMN IF NOT EXISTS password VARCHAR(255)",
                         "ALTER TABLE the ADD COLUMN IF NOT EXISTS so_du DECIMAL(15, 2) DEFAULT 0 CHECK (so_du >= 0)",
                         "ALTER TABLE loai_the ADD COLUMN IF NOT EXISTS dau_so VARCHAR(6) DEFAULT '970400'",
+                        "DROP VIEW IF EXISTS vw_sao_ke_giao_dich CASCADE",
                         "ALTER TABLE giao_dich ALTER COLUMN tk_nguon TYPE VARCHAR(20)",
                         "ALTER TABLE giao_dich ALTER COLUMN tk_dich TYPE VARCHAR(20)",
                         "ALTER TABLE giao_dich DROP CONSTRAINT IF EXISTS giao_dich_tk_nguon_fkey",
-                        "ALTER TABLE giao_dich DROP CONSTRAINT IF EXISTS giao_dich_tk_dich_fkey"
+                        "ALTER TABLE giao_dich DROP CONSTRAINT IF EXISTS giao_dich_tk_dich_fkey",
+                        "CREATE OR REPLACE VIEW vw_sao_ke_giao_dich AS SELECT gd.ma_gd, gd.ngay_gd, gd.loai_gd, gd.tk_nguon, gd.tk_dich, gd.so_tien, gd.noi_dung FROM giao_dich gd ORDER BY gd.ngay_gd DESC"
                     ]
                     for q in queries:
                         try:
