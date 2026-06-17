@@ -7,6 +7,11 @@ DROP TABLE IF EXISTS tai_khoan CASCADE;
 DROP TABLE IF EXISTS khach_hang CASCADE;
 DROP TABLE IF EXISTS nhan_vien CASCADE;
 
+-- DỌN DẸP CÁC HÀM CŨ (JUNK) TỪ CÁC PHIÊN BẢN TRƯỚC
+DROP PROCEDURE IF EXISTS proc_transfer(VARCHAR, VARCHAR, DECIMAL, TEXT);
+DROP PROCEDURE IF EXISTS sp_chuyen_khoan(VARCHAR, VARCHAR, DECIMAL, TEXT);
+DROP FUNCTION IF EXISTS func_update_balance() CASCADE;
+
 -- 2. TẠO LẠI BẢNG (Đã bổ sung tài khoản Khách hàng và Trạng thái thẻ)
 CREATE TABLE nhan_vien (
     ma_nv VARCHAR(10) PRIMARY KEY, 
